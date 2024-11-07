@@ -23,4 +23,3 @@ AND inning_half = 'BOTTOM'
 AND batter_mlb_player_id = 687052;
 
 You'll see that the base_state and score don't align. I noticed this when spot-checking my purple dots for the default 4/8 game.
-
