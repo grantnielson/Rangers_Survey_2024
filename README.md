@@ -14,7 +14,7 @@ SQL QUERIES:
 It wouldn't let me upload pitch_data.csv, so if you run my code you'll have to download it yourself. Team and player data are here.
 
 Side Note:
-There are some inconsistencies in the give 'pitch_data.csv'. For example, if you query:
+There are some inconsistencies in the given 'pitch_data.csv'. For example, if you query:
 SELECT * 
 FROM pitch_data 
 WHERE game_pk = 670284
