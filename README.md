@@ -1,5 +1,8 @@
 # Rangers_Survey_2024
 
+Bayesian hit streak simulation: Semien
+
+
 Find my RShiny visualization at 
 https://grant-nielson.shinyapps.io/win_prob/
 
