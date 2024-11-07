@@ -1,0 +1,349 @@
+---
+title: "Marcus Semien - Hit Streak"
+author: "Grant Nielson"
+date: "2024-11-07"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE,cache=F}
+knitr::opts_chunk$set(echo = F)
+library(vroom)
+library(tidyr)
+library(dplyr)
+library(nimble)
+library(coda)
+
+set.seed(3) 
+#read in data. park factors and semien data obtained from statcast search. 
+schedule<-vroom('schedule_clean.csv')
+marcus_pa_home <- vroom('marcus_pa_home.csv')
+marcus_pa_away <- vroom('marcus_pa_away.csv')
+```
+
+![Marcus Semien, Texas Ranger](semien.jpg)
+
+To find the probability of Marcus Semien obtaining a 20-game + hitting streak, I used a Bayesian model to simulate game-by-game hitting average for many 2025 seasons. I included ballpark factors for each venue from the Ranger’s actual ‘25 schedule, and estimated increases and decreases in BB and BA by age. All hitting averages were randomly sampled from Semien’s 2024 season and then adjusted based on draws from the ballpark, walk rate, and batting average effects for each sample. 
+
+I chose Marcus Semien becuase he's been our fearless leadoff hitter for the past few years; playing excellent defense, going to multiple all-star games, and rarely missing games. I'm sure the Rangers value him just right, but I think he is a little less heralded by fans and in the media compared to Corey Seager, El Bombi, and the revolving door of sensational rookies (Jung, Carter, Langford, Rocker, etc.)
+
+A few assumptions/clarifications:
+
+- **All games were assumed to be independent of each other (no hot hand advantage)**
+- **No playoffs**
+- **I sampled just from Marcus’ 2024 season. If I did it again, I would use techniques from Marcel the Monkey’s predictions and have 2024 weighted 5x, 2023 weighted 4x, and 2022 weighted 3x.**
+- **After deliberation, I did not include Plate Appearance estimates. I sampled hitting averages directly from games.**
+- **I assumed Marcus would play all 162 games. I doubt that will be the case given that most players won’t play all games, he missed a few last year, he is only getting older, but given that he played every game in 2023, it’s not out of the question.**
+- **I did not account for the change in hit probability over the course of a game - third time thru the order penalty, hitting a closer, etc.**
+- **I did not account for specific team’s pitchers or pitching performance. I did use each team’s ballpark effects. The variance from the priors will help capture some of the pitcher variance, but not concerning pitching staff strength.**
+- **I did not explicitly account for variance in pitching strength for a team over a series (Ragans or Lugo one day to Brady Singer/Kyle Wright has an effect). However, there is game by game variance which helps capture this.**
+
+## Data Formatting
+```{r, cache=F}
+#change schedule
+# df only has one row per series, expand that out to a full season
+schedule <- schedule %>% uncount(Series_Length)
+
+#set home game to ranger's park effect for hits of 100
+schedule$Park_Effect[schedule$Home_Away == 1] <- 100
+#change schedule ^^
+
+
+#constants for model. calculate hitting average, batting average, and walks from 2024 season
+marcus_home_avg_ha <- (sum(marcus_pa_home$Hits)/(sum(marcus_pa_home$PA)))
+marcus_away_avg_ha <- (sum(marcus_pa_away$Hits)/(sum(marcus_pa_away$PA)))
+
+marcus_home_avg_ba <- (sum(marcus_pa_home$Hits)/(sum(marcus_pa_home$AB)))
+marcus_away_avg_ba <- (sum(marcus_pa_away$Hits)/(sum(marcus_pa_away$AB)))
+
+marcus_home_avg_bb <- (sum(marcus_pa_home$walks)/(sum(marcus_pa_home$PA)))
+marcus_away_avg_bb <- (sum(marcus_pa_away$walks)/(sum(marcus_pa_away$PA)))
+
+#home
+ba_age_adjustor <- .991
+walk_age_adjustor <- 1.048
+# 
+# #formula to obtain hitting average. 
+# #helpful because we can explore how variance in ba and walks from age affect hitting ability.
+ha_pred_old_home <- (sum(marcus_pa_home$Hits) * marcus_home_avg_ba) / (sum(marcus_pa_home$Hits) + sum(marcus_pa_home$walks) * marcus_home_avg_ba )
+ha_pred_new_home <- (sum(marcus_pa_home$Hits) * (marcus_home_avg_ba*ba_age_adjustor)) / (sum(marcus_pa_home$Hits) + (sum(marcus_pa_home$walks)*walk_age_adjustor) * marcus_home_avg_ba )
+
+# # The pred using the formula isn't exactly right since I didn't account for sac flies
+# # So, getting a percentage change here to apply to actual hitting average.
+percentage_change <- (ha_pred_new_home - ha_pred_old_home) / ha_pred_old_home
+marcus_home_avg_ha_new <- marcus_home_avg_ha * (1 + percentage_change)
+
+#Same for Away
+ha_pred_old_away <- (sum(marcus_pa_away$Hits) * marcus_away_avg_ba) / (sum(marcus_pa_away$Hits) + sum(marcus_pa_away$walks) * marcus_away_avg_ba )
+ha_pred_new_away <- (sum(marcus_pa_away$Hits) * (marcus_away_avg_ba*ba_age_adjustor)) / (sum(marcus_pa_away$Hits) + (sum(marcus_pa_away$walks)*walk_age_adjustor) * marcus_away_avg_ba )
+
+percentage_change <- (ha_pred_new_away - ha_pred_old_away) / ha_pred_old_away
+marcus_away_avg_ha_new <- marcus_away_avg_ha * (1 + percentage_change)
+
+
+
+################ NEW things to define
+# sum_hits_home <- sum(marcus_pa_home$Hits)
+# marcus_home_avg_ba <- (sum(marcus_pa_home$Hits)/(sum(marcus_pa_home$AB)))
+# sum_walks_home <- sum(marcus_pa_home$walks)
+# 
+# sum_hits_away <- sum(marcus_pa_away$Hits)
+# marcus_away_avg_ba <- (sum(marcus_pa_away$Hits)/(sum(marcus_pa_away$AB)))
+# sum_walks_away <- sum(marcus_pa_away$walks)
+# 
+# marcus_pa_home_ha <- marcus_pa_home$ha 
+# marcus_pa_away_ha <- marcus_pa_away$ha 
+
+marcus_pa_home$home_road <- 1
+marcus_pa_away$home_road <- 0
+
+#combine home and away real quick to get index for all games
+combined_pa <- bind_rows(marcus_pa_home, marcus_pa_away)
+combined_pa <- combined_pa %>%
+  arrange(Date)
+combined_pa$game_no <- 1:nrow(combined_pa)
+
+combined_pa <- combined_pa %>%
+  arrange(home_road)
+combined_pa$home_road_index <- 1:nrow(combined_pa)
+
+```
+
+### A word on priors:
+
+You'll see the BB & BA age effects, and parks effects, are normal with small standard deviations. This is because I took those as calculated values from Statcast and Dynasty Guru. We want them to vary to capture the change in games against different teams, but they are fixed effects in theory.
+
+Hitting each game varies quite a bit, which is why I randomly sampled Hitting Average from Semien's 2024 season. The uniform prior is just a sampling tool to get an index. We see in the distribution plot that the posterior distributions match Semien's real HA distribution by game.
+
+## Model
+
+```{r model,cache=F}
+# define model
+code <- nimbleCode({
+  # sample home and away game indicies
+  away_index ~ dunif(1, 81)
+  home_index ~ dunif(82, 159)
+
+  # use the sampled index to retrieve ha_home and ha_away values
+  ha_home <- combined_pa_ha[round(home_index)]
+  ha_away <- combined_pa_ha[round(away_index)]
+  
+  # normal priors for the age adjustment effects
+  ba_age_adjustor_effect ~ dnorm(0.991, sd = 0.01)
+  walk_age_adjustor_effect ~ dnorm(1.048, sd = 0.01)
+  #prior for rangers park effect
+  rangers_park_effect ~ dnorm(100, sd = 2)
+  
+  # loop over each park effect
+  for (i in 1:n_parks) {
+    park_effects[i] ~ dnorm(mean_park_effects[i], sd = 2)
+  }
+  
+  #home - get change in hitting average as proportion, apply it to ha prior
+  ha_pred_new_home <- (sum_hits_home * (marcus_home_avg_ba * ba_age_adjustor_effect)) / 
+    (sum_hits_home + (sum_walks_home * walk_age_adjustor_effect) * marcus_home_avg_ba)
+  
+  percentage_change_home <- (ha_pred_new_home - ha_pred_old_home) / ha_pred_old_home
+  marcus_home_avg_ha_new <- ha_home * (1 + percentage_change_home)
+  
+  #away - get change in hitting average as proportion, apply it to ha prior
+  ha_pred_new_away <- (sum_hits_away * (marcus_away_avg_ba * ba_age_adjustor_effect)) / 
+    (sum_hits_away + (sum_walks_away * walk_age_adjustor_effect) * marcus_away_avg_ba)
+  
+  percentage_change_away <- (ha_pred_new_away - ha_pred_old_away) / ha_pred_old_away
+  marcus_away_avg_ha_new <- ha_away * (1 + percentage_change_away)
+  
+  #final prob. calculation - add park effect
+  for (j in 1:n_games) {
+    probabilities[j] <- marcus_away_avg_ha_new * (park_effects[park_id[j]] / 100)
+  }
+})
+
+# define data and constants for the model
+constants <- list(
+  n_parks = length(unique(schedule$Opponent)),
+  mean_park_effects = tapply(schedule$Park_Effect, schedule$Opponent, mean),
+  n_games = nrow(schedule),
+  # Home_Away = schedule$Home_Away,
+  park_id = as.numeric(factor(schedule$Opponent)),
+  
+  sum_walks_home = sum(marcus_pa_home$walks),
+  marcus_home_avg_ba = marcus_home_avg_ba,
+  sum_hits_home = sum(marcus_pa_home$Hits),
+  
+  sum_walks_away = sum(marcus_pa_away$walks),
+  marcus_away_avg_ba = marcus_away_avg_ba,
+  sum_hits_away = sum(marcus_pa_away$Hits),
+  ha_pred_old_home = ha_pred_old_home,
+  ha_pred_old_away = ha_pred_old_away
+  
+)
+
+data <- list(
+  marcus_pa_home_ha = marcus_pa_home$ha,
+  
+  marcus_pa_away_ha = marcus_pa_away$ha,
+  # combined_ha_vector <- c(marcus_pa_home$ha, marcus_pa_away$ha)
+  combined_pa_ha = combined_pa$ha
+
+)
+
+# Initial values, not super critical
+inits <- list(
+  # ha_home_index = sample(1:159, 1),
+  # ha_away_index = sample(1:159, 1),
+  ba_age_adjustor_effect = 0.991,
+  walk_age_adjustor_effect = 1.048,
+  rangers_park_effect = 100,
+  park_effects = rep(1, constants$n_parks)
+)
+
+# define the model
+model <- nimbleModel(code, constants = constants, data = data, inits = inits)
+
+# Set up the MCMC configuration
+mcmc_conf <- configureMCMC(model)
+mcmc_conf$addMonitors(c("probabilities","ha_home", "ha_away", "ba_age_adjustor_effect", "walk_age_adjustor_effect", "park_effects"))
+mcmc <- buildMCMC(mcmc_conf)
+
+# compile the model and MCMC
+cmodel <- compileNimble(model)
+cmcmc <- compileNimble(mcmc, project = model)
+
+print(nrow(schedule))
+```
+
+```{r,run,cache=F}
+# run mcmc
+results <- runMCMC(cmcmc, nchains = 4, niter = 10000, nburnin = 1500, thin = 10, samplesAsCodaMCMC = TRUE, summary = TRUE, WAIC = FALSE)
+
+
+print(summary(results))
+mcmc_samples <- results$samples
+
+probabilities_50 <- results$samples[, "probabilities[40]"]
+
+# Plot the density with a title
+densplot(probabilities_50, main = "Density of Probabilities[50] (They all look about the same)", xlab = "Hitting Average")
+hist(combined_pa$ha, main= 'Semien 2024 Hitting Average by game')
+
+plot(probabilities_50,main='trace plot for Probabilities[50]')
+
+
+```
+The densities for the posterior probabilites plots match the actual distribution, which is good.
+
+The convergence plots for each game are similar. Each chain seems to nearly converge, and they are different from each other. This is okay, because this model isn't trying to estimate exact parameters, it's being used as a simulation tool. We wouldn't expect any season to have the same exact hit probability. 
+
+
+## Extract Probabilites from model
+```{r,cache=F}
+samples_matrix <- as.matrix(mcmc_samples)
+
+n_simulations <- 20000
+
+#get just the probabilities columns
+probability_columns <- grep("^probabilities\\[", colnames(samples_matrix), value = TRUE)
+
+# get only probability columns and convert to matrix
+posterior_probabilities <- as.matrix(samples_matrix[, probability_columns])
+
+# function to check for a 20-game hit streak
+has_20_game_streak <- function(hit_sequence) {
+  # Check for a sequence of at least 20 consecutive hits
+  streaks <- rle(hit_sequence)$lengths  # Run-length encoding to get streak lengths
+  any(streaks >= 20 & rle(hit_sequence)$values == 1)  # Look for a 20-hit streak
+}
+
+# intialize
+streak_count <- 0
+
+# simulations for each sampled season
+ 
+for (i in 1:n_simulations) {
+  # Randomly select a set of probabilities (one simulated season) from posterior samples
+  sampled_season_probs <- posterior_probabilities[sample(nrow(posterior_probabilities), 1), ]
+  
+  # Simulate hits based on sampled probabilities
+  simulated_hits <- rbinom(length(sampled_season_probs), size = 1, prob = sampled_season_probs)
+  
+  # Check if this simulated season has a 20-game hit streak
+  if (has_20_game_streak(simulated_hits)) {
+    streak_count <- streak_count + 1
+  }
+}
+
+# calculate the probability of a 20-game hit streak
+probability_20_game_streak <- streak_count / n_simulations
+print(probability_20_game_streak)
+
+
+
+# get 95% interval
+# Initialize vector to store streak results
+streak_results <- numeric(n_simulations)
+
+# Run simulations for each sampled season
+for (i in 1:n_simulations) {
+  # Randomly select a set of probabilities (one simulated season) from posterior samples
+  sampled_season_probs <- posterior_probabilities[sample(nrow(posterior_probabilities), 1), ]
+
+  # Simulate hits based on sampled probabilities
+  simulated_hits <- rbinom(length(sampled_season_probs), size = 1, prob = sampled_season_probs)
+
+  # Check if this simulated season has a 20-game hit streak
+  streak_results[i] <- as.numeric(has_20_game_streak(simulated_hits))
+}
+
+# Calculate the estimated probability of a 20-game hit streak
+probability_20_game_streak <- mean(streak_results)
+print(probability_20_game_streak)
+
+# Calculate 95% credible interval using a Bayesian method with a Beta(1,1) prior
+alpha <- sum(streak_results) + 1
+beta <- n_simulations - sum(streak_results) + 1
+credible_interval <- qbeta(c(0.025, 0.975), alpha, beta)
+
+cat("95% credible interval: ",{credible_interval})
+
+
+
+
+
+```
+## Analysis
+
+I give Semien a **<font size="5">`r {probability_20_game_streak}`</font>** chance of getting a 20-game hit streak next year, with a 95% credible interval of (`r round(credible_interval,4)`). To validate this result, I compared it to the probability of getting the streak using Fan graph's formula to validate. This is a nice formula but assumes that Semien has the same number of plate appearances (4) and hitting average (.215) for every game/at bat:
+
+\[ p = \text{probability of success (probability of hitting in a game)} \]
+\[ k = \text{length of streak} \]
+\[ G = \text{number of games in a season} \]
+\[ N = \text{estimated opportunities to begin a streak}  \]
+\[ N = \text{(G - k) * (1 - p) + 1} \]
+
+Plug In:
+\[ p = 0.620 = 1 - (1 - 0.215)^4 \quad \text{(Marcus's hitting average (hits/PA) on the season was 0.215)} \]
+\[ k = 20 \]
+\[ G = 159 \]
+\[ N = 48 = (G - k) \cdot (1 - p) + 1 \]
+
+The probability of at least one 20-game streak is:
+\[ P(\text{at least one 20-game streak}) = 0.003 = N \cdot p^k \]
+
+
+
+
+Having the formula in my credible interval is a validating, although it's worth noting that this wasn't always the case when I changed my seed. 
+
+The variance in the simulation makes it easier to get a zero (yet easier to have a big game), which is more representative of a real season. Sometimes, there could be 'clusters' of high variance (good games) for the ha, walk, ba, and park effects estimates that lend themselves to more streaks, but the variance and randomness can also cause lower values than average that keep a streak from happening. 
+
+
+## References
+
+Dynasty Guru age curve BB and BA estimates: (https://thedynastyguru.com/2019/02/27/aging-gracefully-approaching-aging-curves-and-advanced-stats-part-ii/)
+
+Fangraphs article on streaks: https://tht.fangraphs.com/the-probability-of-streaks/
+
+Statcast park factors: https://baseballsavant.mlb.com/leaderboard/statcast-park-factors?type=year&year=2024&batSide=&stat=index_wOBA&condition=All&rolling=&sort=8&sortDir=desc
+
