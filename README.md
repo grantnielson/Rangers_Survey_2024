@@ -1,6 +1,8 @@
 # Rangers_Survey_2024
 
-Bayesian hit streak simulation report: Semien_HitStreak_Nielson_Final.pdf
+Bayesian hit streak simulation 
+Report: Semien_HitStreak_Nielson_Final.pdf
+Code: Streak3.Rmd
 
 Find my RShiny visualization at 
 https://grant-nielson.shinyapps.io/win_prob/
